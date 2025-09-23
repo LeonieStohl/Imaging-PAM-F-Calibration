@@ -1,0 +1,416 @@
+import tkinter as tk
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+from tkinter import filedialog
+from tkinter import Tk
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+
+#_________________________________________________Data import___________________________________________________________
+
+'''
+Loads an Excel workbook containing multiple sheets, each representing a different experimental setting.
+Reads the concentration values from predefined columns (A, C, E, G, ..., Y) based on their column indices, rows 4 to 12, which apply across all columns in the sheet.
+Extracts material and replicate information from row 1 of each relevant column (e.g., "Material Replicate") and splits it into separate variables.
+For each valid (non-empty) signal, creates a dictionary entry with the sheet name, material, replicate, concentration, and signal.
+Appends all these entries to a list and then converts the list into a pandas.DataFrame (e.g. df_low_range/df_low_range)
+Cleans the signal and concentration values by converting commas to dots and coercing them into floats (fixes different OS  languages using different decimal operators).
+Prints a warning if any NaN values are found after conversion; otherwise, confirms the dataset is clean.
+'''
+
+# List of columns to process (C, E, G, I, K, M, O, Q, S, U, W, Y)
+col_indexes = [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25]
+
+
+# Hide the root window
+root = tk.Tk()
+root.withdraw()
+
+# Open a file dialog and ask the user to select an Excel file
+file_path = filedialog.askopenfilename(
+    title="Select Excel file",
+    filetypes=[("Excel files", "*.xlsx *.xls")]
+)
+
+# Load the selected workbook
+if file_path:
+    excel_data = load_workbook(file_path, data_only=True)
+else:
+    raise ValueError("No file selected.")
+
+
+#creates empty list (of dictionaries)
+all_data = []
+
+
+for sheet_name in excel_data.sheetnames:
+    ws = excel_data[sheet_name]
+
+    # Read concentrations values from column A, rows 4-12
+    concentrations = [ws[f"A{row}"].value for row in range(4, 13)]
+
+    # Process only specified columns
+    for col in col_indexes:
+        col_letter = get_column_letter(col)
+
+        # Check if there is a value in row 1 (material and replicate name)
+        material_replicate = ws[f"{col_letter}1"].value
+
+        if not material_replicate:
+            continue  # Skip columns without data in row 1
+
+        # Split material-replicate info stored in one excel cells as to variables
+        parts = material_replicate.split(" ")
+        material_cell = parts[0]  # Material
+        replicate_name = " ".join(parts[1:])  # Replicate
+
+        # Extract signal values from rows 4 to 12
+        signals = [ws[f"{col_letter}{row}"].value for row in range(4, 13)]
+
+        # Store data for each valid (non-empty) signal
+        for conc, signal in zip(concentrations, signals):
+            if signal is not None:  # Only include rows with valid signal values
+                all_data.append({
+                    "Setting": sheet_name,
+                    "Material": material_cell,
+                    "Replicate": replicate_name,
+                    "Concentration": conc,
+                    "Signal": signal
+                })
+
+# Create DataFrame
+df_excel_data = pd.DataFrame(all_data)
+
+# Clean: Convert signal values to float and fix comma decimal separators (locale safe)
+for col in ["Signal", "Concentration"]:
+    df_excel_data[col] = pd.to_numeric(df_excel_data[col].astype(str).str.replace(",", "."), errors="coerce")
+
+# Check for NaN values in the DataFrame
+#if df_excel_data.isna().sum().any():
+    #print("Warning: The dataset contains NaN values.")
+#else:
+    #print("No NaN values found in the dataset.")
+
+# Display the results
+#with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #print(df_excel_data)
+
+
+#__________________________________________________Analysis_____________________________________________________________
+'''
+Filtering each replicates for valid signals to determine the edge cases. This is needed because of the high x-range and
+the fact that the majority of the signal mesured are clumped in a comparetively short x - range. 
+Without this manual filtering, the linear fitting does not correctly detect lower detection limits
+-->  Check for data quality within a replicate
+
+Input:      df_filtered_replicates       columns:     [Material, Replicate, Concentration, Signal]
+Output:     df_signal_averages           columns:     [Material, Replicate, Concentration, Signal] 
+with NaN for signal that are 0 or dont meet the threshhold increase of 5%
+'''
+filtered_rows = []
+
+# Group by setting, material, replicate
+replicates_filter = df_excel_data.groupby(["Setting", "Material", "Replicate"])
+
+for (setting, material, replicate), group in replicates_filter:
+    conc = group["Concentration"].values
+    signal = group["Signal"].values
+
+    if np.all(signal == 0):
+        continue  
+
+    temp_valid = [None] * len(signal)
+    last_valid_index = None
+
+    # Find first valid start value > 0
+    for i in range(len(signal)):
+        if signal[i] > 0:
+            temp_valid[i] = signal[i]
+            last_valid_index = i
+            break
+
+    if last_valid_index is None:
+        # No valid start value, skip whole group
+        continue
+
+    # Check for all indices after start
+    for i in range(last_valid_index + 1, len(signal)):
+        current_signal = signal[i]
+        prev_signal = signal[last_valid_index]
+
+        if prev_signal * 1.05 < current_signal:  # threshhold: 5%
+            temp_valid[i] = current_signal
+            last_valid_index = i
+        else:
+            # If invalid values within the first 4 values, all previous values are also invalid and the current value is the new start value. 
+            if i <= 3:
+                for j in range(i):
+                    temp_valid[j] = None
+                last_valid_index = i
+            # If invalid within the last 4 values, mark the current one and all subsequent ones invalid
+            elif i >= len(signal) - 4:
+                for k in range(i, len(signal)):
+                    temp_valid[k] = None
+                break
+
+   # Replace Signal in the DataFrame with None (or np.nan) for invalid values
+    signal_filtered = np.array([val if val is not None else np.nan for val in temp_valid])
+
+    df_filtered = group.copy()
+    df_filtered.loc[:, "Signal"] = signal_filtered
+
+    filtered_rows.append(df_filtered)
+
+# Merge all filtered groups, DataFrame with “Signal”, where invalid values are set as NaN
+df_filtered_replicates = pd.concat(filtered_rows, ignore_index=True)
+
+# Display the results
+#with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #print(df_filtered_replicates)
+
+
+'''
+Calculating signal averages from the filtered replicate data
+Input:      df_filtered_replicates       columns:     [Material, Replicate, Concentration, Signal]
+Output:     df_signal_averages_raw       columns:     [Material, Setting, Concentration, Signal_Average, Signal_Error]
+--> Check for data quality within all four replicates/group of setting+ material
+'''
+
+# Group by material, setting, concentration
+grouped = df_filtered_replicates.groupby(['Material', 'Setting', 'Concentration'])
+
+results_filter = []
+
+for (material, setting, concentration), group in grouped:
+    signals = group['Signal'].values  
+
+    # Check whether all 4 replicate values are valid (not NaN)
+    if len(signals) == 4 and not np.isnan(signals).any():
+        signal_avg = np.mean(signals)
+        signal_sem = np.std(signals, ddof=1) / np.sqrt(len(signals))
+    else:
+        signal_avg = np.nan
+        signal_sem = np.nan
+
+    results_filter.append({
+        'Material': material,
+        'Setting': setting,
+        'Concentration': concentration,
+        'Signal_Average': signal_avg,
+        'Signal_Error': signal_sem
+    })
+    
+# resulting df
+df_signal_averages_raw  = pd.DataFrame(results_filter)
+
+
+''' 
+Cutting dataframe entries 
+Input:     df_signal_averages_raw       columns:     [Material, Setting, Concentration, Signal_Average, Signal_Error]
+Output:    df_signal_averages           columns:     [Material, Setting, Concentration, Signal_Average, Signal_Error]
+'''
+
+df = df_signal_averages_raw.copy()
+# grouping all 4 replicates together
+grouped = df.groupby(['Material', 'Setting'])
+
+# Minimum length of subsequent valid F0 signals (=calibration range) is set to 4
+def filter_groups(group):
+    num_valid = group['Signal_Average'].notna().sum()
+    if num_valid >= 4:
+        return True
+    else:
+        return False
+
+# Keep all valid groups and cut the rest
+valid_groups = grouped.filter(filter_groups)
+df_signal_averages = valid_groups.reset_index(drop=True)
+
+# Display the results
+#with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #print(df_signal_averages)
+
+
+'''
+Sliding window
+Input:     df_signal_averages  columns:     [Material, Setting, Concentration, Signal_Average, Signal_Error]
+Output:    df_fits             columns:     [Material, Setting, Start_Concentration, End_Concentration, Range_Width, R2_Value, Slope, Intercept, Rating]  
+'''
+
+results = []
+
+# Iterates over Material + Setting
+for (material, setting), group in df_signal_averages.groupby(['Material', 'Setting']):
+    group = group.dropna(subset=['Signal_Average', 'Signal_Error'])
+    group = group.reset_index(drop=True)
+    n = len(group)
+
+    # Recheck if all 4 replicates are valid
+    if n < 4:
+        continue  
+
+    for start in range(n - 3):
+        for end in range(start + 4, n + 1):
+            window = group.iloc[start:end]
+            x = window['Concentration'].values
+            y = window['Signal_Average'].values
+            errors = window['Signal_Error'].replace(0, 1e-6).values
+            weights = 1 / (errors ** 2)
+
+            X = sm.add_constant(x)
+            model = sm.WLS(y, X, weights=weights)
+            fit = model.fit()
+
+            # Predict fitted signal
+            y_pred = fit.predict(X)
+
+            # Residuals (difference between actual and predicted)
+            residuals = y - y_pred
+            abs_residuals = np.abs(residuals)
+
+            # Residual-based filtering: Residuals too large compared to actual signal (e.g., > 20%)
+            if np.any(abs_residuals / y > 0.2):
+                continue
+
+            # Skip fits with r2 less than 0.8
+            r2 = fit.rsquared
+            if r2 < 0.8:
+                continue
+
+            slope = fit.params[1]
+            intercept = fit.params[0]
+            range_width = end - start
+            start_conc = x[0]
+            end_conc = x[-1]
+
+            # Rating
+            residual_mean = np.mean(np.abs(residuals))
+            #rating = 0.8 * r2 + 0.2 * (range_width / 9) - 100 * residual_mean
+            norm_r2 = (r2 - 0.8) / 0.2
+            norm_range = (range_width - 4) / (9-4)
+            rating = 0.5 * norm_r2 + 0.5 * norm_range - 100 * residual_mean
+
+            # Saving of the different possibilities/linear fits for each combination of material + setting
+            results.append({
+                'Material': material,
+                'Setting': setting,
+                'Start_Concentration': start_conc,
+                'End_Concentration': end_conc,
+                'Range_Width': range_width,
+                'R2_Value': r2,
+                'Slope': slope,
+                'Intercept': intercept,
+                'Rating': rating
+            })
+
+df_fits = pd.DataFrame(results)
+
+# Display the results
+#with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #print(df_fits)
+
+'''
+Choosing the best linear fit for each Setting + Material combination with the previously calculated score.
+Cuts away all linear fits that were not chosen and drastically reduces the data frame
+Input:    df_fits             columns:     [Material, Setting, Start_Concentration, End_Concentration, Range_Width, R2_Value, Slope, Intercept, Rating]  
+Output:   df_best_fits        columns:     [Material, Setting, Start_Concentration, End_Concentration, Range_Width, R2_Value, Slope, Intercept, Rating] 
+'''
+
+# Sorting for best rating per material + setting combination
+best_indices = df_fits.groupby(['Material', 'Setting'])['Rating'].idxmax()
+
+# Only keep the best fit per material + setting combination
+df_best_fits = df_fits.loc[best_indices].reset_index(drop=True)
+
+# Display the results
+#with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #print(df_best_fits)
+
+'''
+Choosing the setting for each Material. Cuts away all settings that were not chosen and drastically reduces the data frame
+Input:  df_best_fits        columns:     [Material, Setting, Start_Concentration, End_Concentration, Range_Width, R2_Value, Slope, Intercept, Rating] 
+Output: df_best_settings    columns:     [Material, Setting, Start_Concentration, End_Concentration, Range_Width, R2_Value, Slope, Intercept, Rating]
+'''
+# For each Material, find the index of the row with the highest Rating
+idx = df_best_fits.groupby('Material')['Rating'].idxmax()
+
+# Use these indices to select the best rows
+df_best_settings = df_best_fits.loc[idx].reset_index(drop=True)
+
+# Display the results
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    print(df_best_settings)
+
+#__________________________________________________Data Export__________________________________________________________
+
+# Average the measured signal intensity of the replicates and store the information in signal average + signal error
+df_signal_averages_all_data = df_excel_data.groupby(['Material', 'Setting', 'Concentration']).agg(
+    Signal_Average=('Signal', 'mean'),
+    Signal_Error=('Signal', lambda x: x.std(ddof=1) / np.sqrt(len(x))),
+    Count=('Signal', 'count')
+).reset_index()
+
+# Merge signal averages with best settings
+df_combined = df_signal_averages_all_data.merge(
+    df_best_settings,
+    on=['Material', 'Setting'],
+    how='inner'
+)
+
+# --- Ask user where to save the file ---
+root = Tk()
+root.withdraw()  # Hide the main tkinter window
+
+file_path = filedialog.asksaveasfilename(
+    title="Save Excel file",
+    defaultextension=".xlsx",
+    filetypes=[("Excel files", "*.xlsx")]
+)
+
+# --- Save if valid path selected ---
+if file_path:
+    df_combined.to_excel(file_path, index=False, sheet_name='Results')
+    print(f"Results saved to: {file_path}")
+else:
+    raise ValueError("No file path selected.")
+
+#__________________________________________________Plotting_____________________________________________________________
+
+materials = df_best_settings['Material'].unique()
+fig, axes = plt.subplots(len(materials), 1, figsize=(8, 5 * len(materials)), sharex=True)
+
+if len(materials) == 1:
+    axes = [axes]  # make iterable
+
+for ax, material in zip(axes, materials):
+    row = df_best_settings[df_best_settings['Material'] == material].iloc[0]
+    setting = row['Setting']
+    start_conc = row['Start_Concentration']
+    end_conc = row['End_Concentration']
+    slope = row['Slope']
+    intercept = row['Intercept']
+
+    df_sub = df_signal_averages[
+        (df_signal_averages['Material'] == material) &
+        (df_signal_averages['Setting'] == setting)
+    ].sort_values('Concentration')
+
+    # Plot signal average with error bars first
+    ax.errorbar(df_sub['Concentration'], df_sub['Signal_Average'], yerr=df_sub['Signal_Error'],
+                marker='o', linestyle='-', label='Signal Average')
+
+    # Then plot linear fit line on top
+    x_fit = np.linspace(start_conc, end_conc, 100)
+    y_fit = slope * x_fit + intercept
+    ax.plot(x_fit, y_fit, linestyle='--', color='red', label='Linear Fit', zorder=10)
+
+    ax.set_title(f'Material: {material}, Setting: {setting}')
+    ax.set_ylabel('Signal')
+    ax.legend()
+
+axes[-1].set_xlabel('Concentration')
+plt.tight_layout()
+plt.show()
