@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 #_________________________________________________Data import___________________________________________________________
 
 '''
-Loads an Excel workbook containing multiple sheets, each representing a different experimental setting.
+Loads an Excel workbook containing multiple sheets, each representing a different experimental setting. Works with the supplied datasheet.
 Reads the concentration values from predefined columns (A, C, E, G, ..., Y) based on their column indices, rows 4 to 12, which apply across all columns in the sheet.
 Extracts material and replicate information from row 1 of each relevant column (e.g., "Material Replicate") and splits it into separate variables.
 For each valid (non-empty) signal, creates a dictionary entry with the sheet name, material, replicate, concentration, and signal.
@@ -146,11 +146,13 @@ for (setting, material, replicate), group in replicates_filter:
             last_valid_index = i
         else:
             # If invalid values within the first 4 values, all previous values are also invalid and the current value is the new start value. 
+            # ADJUST "START" here
             if i <= 3:
                 for j in range(i):
                     temp_valid[j] = None
                 last_valid_index = i
             # If invalid within the last 4 values, mark the current one and all subsequent ones invalid
+            # ADJUST "END" here
             elif i >= len(signal) - 4:
                 for k in range(i, len(signal)):
                     temp_valid[k] = None
@@ -218,6 +220,7 @@ df = df_signal_averages_raw.copy()
 grouped = df.groupby(['Material', 'Setting'])
 
 # Minimum length of subsequent valid F0 signals (=calibration range) is set to 4
+# ADJUST nmin here. nmax is the maximum (here 9)
 def filter_groups(group):
     num_valid = group['Signal_Average'].notna().sum()
     if num_valid >= 4:
@@ -272,12 +275,12 @@ for (material, setting), group in df_signal_averages.groupby(['Material', 'Setti
             abs_residuals = np.abs(residuals)
 
             # Residual-based filtering: Residuals too large compared to actual signal (e.g., > 20%)
-            if np.any(abs_residuals / y > 0.2):
+            if np.any(abs_residuals / y > 0.2): # ADJUST Rmax here (=0.2)
                 continue
 
             # Skip fits with r2 less than 0.8
             r2 = fit.rsquared
-            if r2 < 0.8:
+            if r2 < 0.8: # ADJUST R2min here (=0.8)
                 continue
 
             slope = fit.params[1]
@@ -288,10 +291,9 @@ for (material, setting), group in df_signal_averages.groupby(['Material', 'Setti
 
             # Rating
             residual_mean = np.mean(np.abs(residuals))
-            #rating = 0.8 * r2 + 0.2 * (range_width / 9) - 100 * residual_mean
-            norm_r2 = (r2 - 0.8) / 0.2
-            norm_range = (range_width - 4) / (9-4)
-            rating = 0.5 * norm_r2 + 0.5 * norm_range - 100 * residual_mean
+            norm_r2 = (r2 - 0.8) / 0.2 # ADJUST here if you changed R2min
+            norm_range = (range_width - 4) / (9-4) # ADJUST here for your tested range. nmin = 4, nmax = 9
+            rating = 0.5 * norm_r2 + 0.5 * norm_range - 100 * residual_mean # ADJUST a and b here (both 0.5)
 
             # Saving of the different possibilities/linear fits for each combination of material + setting
             results.append({
