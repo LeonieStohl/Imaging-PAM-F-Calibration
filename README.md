@@ -1,4 +1,4 @@
--  This code and all interchangable variables are described in the publication XXXX
+-  This code and all interchangable variables are described in the publication "Standardized Imaging PAM-F for quantifying algal subaerial biomass on building materials" in the journal International Biodeterioration and Biodegradation 
 -  The variables in this code are tailored to a dataset available here: DOI 10.5281/zenodo.17184214
 -  For the use on own data, the code must be adapted to the own Datastructure (e.g. structure of an Excelfile) and the own experimental variables.
 
